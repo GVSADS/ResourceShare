@@ -603,73 +603,118 @@ if (typeof window.ResourceShareManager === 'undefined') {
         updateStatus() {}
         clearCache() { this.cache.clear(); this.cleanupBlobUrls(); }
 
-        // V1.3.7.1: 生成内联脚本 SourceURL 的辅助方法
+        // V1.3.7.4 [修正版]: 生成内联脚本 SourceURL
+        // 增强了文件名清理逻辑，防止特殊字符破坏 SourceMap
         generateInlineScriptSourceURL() {
             let pageName = 'unknown';
             try {
                 const pathParts = window.location.pathname.split('/');
                 let fileName = pathParts[pathParts.length - 1];
                 if (!fileName || fileName.endsWith('/')) fileName = 'index';
-                // 去除后缀
+                
+                // 去除文件扩展名
                 const lastDot = fileName.lastIndexOf('.');
                 if (lastDot > -1) fileName = fileName.substring(0, lastDot);
-                // 去除非法字符
+                
+                // 过滤非法字符 (防止路径包含 ? 等查询符)
                 fileName = fileName.replace(/[^a-zA-Z0-9_-]/g, '_');
                 if (fileName.length === 0) fileName = 'page';
                 pageName = fileName;
             } catch (e) {
                 pageName = 'unknown';
             }
+            
             const index = this.scriptExecuteCounter++;
             const randomStr = generateRandomString(6);
-            return `./RS_VM/VM_${pageName}_${index}_${randomStr}.js`;
+            
+            // 返回当前域下的虚拟路径
+            return `./RS_VM/VM_${pageName}_inline_${index}_${randomStr}.js`;
         }
 
-        // V1.3.7.2: 生成 resource-share 完整路径 SourceURL
+        // V1.3.7.4 [修正版]: 生成 resource-share 虚拟 SourceURL
+        // 解决异源加载时 sourceURL 映射无效的问题，统一映射为当前域名的虚拟路径
         getResourceShareSourceURL(url) {
             try {
+                // 解析 URL 获取原始文件名
                 const urlObj = new URL(url, window.location.href);
-                const pathParts = urlObj.pathname.split('/');
-                const filename = pathParts.pop(); // 取出文件名
+                let filename = urlObj.pathname.split('/').pop(); 
+                
+                // 如果文件名为空（如以 / 结尾），使用默认名
+                if (!filename) filename = 'resource.js';
+
+                // 1. 移除查询参数和哈希 (保留纯文件名)
+                // 避免生成 VM_jquery.min.js?v=1.0.js 这种无效路径
+                const queryIndex = filename.indexOf('?');
+                if (queryIndex !== -1) filename = filename.substring(0, queryIndex);
+                const hashIndex = filename.indexOf('#');
+                if (hashIndex !== -1) filename = filename.substring(0, hashIndex);
+
+                // 2. 过滤文件名中的非法字符
+                // 保留字母、数字、点、下划线、连字符，其他替换为下划线
+                filename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+                // 3. 添加 VM_ 前缀
                 const vmFilename = 'VM_' + filename;
-                pathParts.push(vmFilename); // 放回带前缀的文件名
-                const newPath = pathParts.join('/');
-                return urlObj.origin + newPath;
+
+                // 4. 返回相对路径而非绝对路径
+                // 使用 ./RS_VM/ 前缀，确保该文件在当前页面源下显示
+                return `./RS_VM/${vmFilename}`;
             } catch (e) {
-                // 解析失败回退到基本格式
-                return 'VM_' + url.replace(/[^a-zA-Z0-9_]/g, '_') + '.js';
+                // 解析失败时的回退方案
+                const safeName = url.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 50);
+                return `./RS_VM/VM_${safeName}.js`;
             }
         }
 
         async executeScript(content, sourceUrl = 'Unknown') {
-            return new Promise((resolve) => {
+            return new Promise((resolve, reject) => {
                 if (!content) { resolve(); return; }
-                if (content.startsWith('blob:')) {
+
+                // 1. 生成干净的 SourceURL
+                const cleanSourceUrl = sourceUrl.replace(/^\.\//, '');
+                
+                // 2. 追加 SourceURL 到代码末尾，确保 Chrome DevTools 能正确映射
+                const codeWithSourceMap = `${content}\n//# sourceURL=${cleanSourceUrl}`;
+
+                try {
+                    // 3. 创建 Blob 对象
+                    const blob = new Blob([codeWithSourceMap], { type: 'text/javascript' });
+                    const blobUrl = URL.createObjectURL(blob);
+                    
+                    // 4. 创建真实的 Script 标签
                     const script = document.createElement('script');
-                    script.src = content;
-                    script.onload = () => { 
-                        this.log(`JS(Blob) 已执行 [${sourceUrl}]`, 'success'); 
-                        resolve(); 
-                    };
-                    script.onerror = (e) => {
-                        const loadError = new Error(`Blob Script Load Error: ${sourceUrl}`);
-                        console.error(loadError);
-                        this.handleCriticalError(loadError, sourceUrl);
-                        resolve(); 
-                    };
-                    document.head.appendChild(script);
-                } else {
-                    try {
-                        // V1.3.7.2: 使用生成完整路径的方法
-                        const filename = this.getResourceShareSourceURL(sourceUrl);
-                        const codeWithSourceMap = `${content}\n//# sourceURL=${filename}`;
-                        const executeFunction = new Function(codeWithSourceMap);
-                        executeFunction();
-                        this.log(`JS 已执行 [${filename}]`, 'success');
+                    script.src = blobUrl;
+                    script.type = 'text/javascript';
+                    
+                    // 5. 关键：设置 Layui 需要的数据属性
+                    // 当浏览器通过 src 执行 blob 时，document.currentScript 将指向这个 script 标签
+                    // 我们设置一个自定义属性，以便在获取 src 时能还原出逻辑路径（虽然 Layui 主要读取 blobUrl 本身）
+                    script.setAttribute('data-resource-share-src', cleanSourceUrl);
+                    
+                    // 6. 标记为 ResourceShare 内部标签，防止被拦截
+                    script.setAttribute('data-resource-share', 'executing');
+
+                    // 7. 处理加载结果
+                    script.onload = () => {
+                        this.log(`JS 已执行 [${cleanSourceUrl}]`, 'success');
+                        // 执行成功后，释放 Blob URL 内存
+                        URL.revokeObjectURL(blobUrl);
                         resolve();
-                    } catch (error) { 
-                        throw error; 
-                    }
+                    };
+
+                    script.onerror = (e) => {
+                        this.log(`JS 执行出错 [${cleanSourceUrl}]`, 'danger');
+                        // 只有在发生真正错误时才打印堆栈，避免干扰
+                        console.error('ResourceShare Script Error:', e);
+                        URL.revokeObjectURL(blobUrl);
+                        resolve(); // 即使出错也要 resolve，防止卡死后续流程
+                    };
+
+                    // 8. 插入页面触发执行
+                    document.head.appendChild(script);
+
+                } catch (error) {
+                    reject(error);
                 }
             });
         }
