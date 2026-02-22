@@ -1,0 +1,16 @@
+{
+    "project": "./src",
+    "order": [
+        "Copyright",
+        "utils/utils",
+        "utils/config",
+        "modules/Diagnostics",
+        "modules/ResourceShareUI",
+        "modules/ResourceShareLogger",
+        "modules/ResourceShareManager",
+        "build/output"
+    ],
+    "output": "build/ResourceShare-1.3.7.5.js",
+    "minify": "build/ResourceShare-1.3.7.5.min.js",
+    "map": "build/ResourceShare-1.3.7.5.min.js.map"
+}

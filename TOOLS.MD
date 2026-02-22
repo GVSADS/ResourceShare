@@ -1,0 +1,1 @@
+https://www.mumudroid.com/tools/dev_js_minify.html
